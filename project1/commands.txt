@@ -1,0 +1,9 @@
+git clone https://github.com/stacy0c/Computational-Social-Science-Projects.git
+cd computational-social-science-projects
+mkdir project1
+Cd project1
+Touch commands.txt
+Cd ..
+Git add 
+Git commit -m "project folder and command text"
+Git push origin main 
