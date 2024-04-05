@@ -1,0 +1,457 @@
+---
+title: 'Project 6: Randomization and Matching'
+output: pdf_document
+author: Stacy Chen, worked on this w/ Sofia Guo + Marisa Tsai
+---
+
+```{r}
+# Load tidyverse and MatchIt
+# Feel free to load other libraries as you wish
+library(tidyverse)
+library(MatchIt)
+library(ggplot2)
+library(cobalt)
+library(gridExtra)
+library(optmatch)
+library(dplyr)
+# Load ypsps data
+ypsps <- read_csv('/Users/stacyworkuser/Downloads/ypsps.csv')
+head(ypsps)
+options(scipen = 999)
+
+```
+
+# Randomization
+
+```{r}
+# Generate a vector that randomly assigns each unit to treatment/control
+set.seed(123)
+ypsps <- ypsps %>%
+  mutate(treatment = as.numeric(rbernoulli(length(unique(interviewid)), p = 0.5)))
+baseline_cov <- ypsps %>% 
+	select(student_Gen, treatment)
+# Choose a baseline covariate (use dplyr for this)
+baseline_cov <- ypsps %>% 
+	select(student_Gen, treatment)
+# Visualize the distribution by treatment/control (ggplot)
+ggplot(baseline_cov, aes(x = student_Gen, fill = factor(treatment))) +
+  geom_bar(position = "stack", alpha = 0.7) +
+  labs(x = "Student Gender", y = "Count", fill = "Treatment", title = "Distribution of Student Gender y by Treatment/Control") +
+  scale_fill_manual(values = c("blue", "red"), labels = c("Control", "Treatment")) +
+  theme_minimal()
+```
+Simulation
+```{r}
+
+# Simulate this 10,000 times (monte carlo simulation - see R Refresher for a hint)
+n_simulations <- 10000
+
+sim_results <- matrix(nrow = n_simulations, ncol = 2)
+
+# Perform Monte Carlo simulation
+for (i in 1:n_simulations) {
+  # Generate treatment assignment vector
+  df <- ypsps %>%
+    select(interviewid,student_Gen) %>%
+    mutate(treatment = as.numeric(rbernoulli(length(unique(interviewid)), p=0.5)))
+  
+  # Calculate the proportion of treatment units
+  proportion_treatment <- sum(df$treatment)
+  
+  # Calculate the proportion of Male gender
+  proportion_male <- sum(df$student_Gen[df$treatment == 1])
+  
+  # Store the results
+  sim_results[i, 1] <- proportion_treatment
+  sim_results[i, 2] <- proportion_male
+}
+
+par(mfrow = c(1, 2)) # Arrange plots in one row and two columns
+hist(sim_results[, 1], breaks = 30, main = "Distribution of Treatment Proportions",
+     xlab = "Number of Treatment", ylab = "Frequency")
+hist(sim_results[, 2], breaks = 30, main = "Distribution of Male Gender in Treatment Group",
+     xlab = "Number of Male", ylab = "Frequency")
+
+sim_results_data <- as.data.frame(sim_results)
+names(sim_results_data) <- c("proportion_treatment", "proportion_male")
+
+# Calculate the difference in means (Treatment - Control) for each simulation
+sim_results_data$diff_means <- ifelse(sim_results_data$proportion_treatment == 0, 
+                                      0, 
+                                      sim_results_data$proportion_male / sim_results_data$proportion_treatment)
+
+# Plot the difference in means against simulation index
+ggplot(sim_results_data, aes(x = 1:n_simulations, y = diff_means)) +
+  geom_line() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +  # Add a linear trend line
+  labs(x = "Simulation", y = "Difference in Means (Treatment - Control)", title = "Balance of Student Gender between Treatment and Control") +
+  theme_minimal()
+
+```
+
+
+## Questions
+\begin{enumerate}
+    \item \textbf{What do you see across your simulations? Why does independence of treatment assignment and baseline covariates not guarantee balance of treatment.  assignment and baseline covariates?}
+\end{enumerate}
+
+I see a roughly normal distribution in my simulation in both number of treatment and number of males (gender=1). The balance of Student Gender between Treatment and Control with 10,000 simulations is 50/50. Independence of treatment assignment and baseline covariates doesn't guarantee balance if there is only one draw because of random chance. If the draw happens many times, we can expect it to converge to balance. 
+
+# Propensity Score Matching
+
+## One Model: using gender, race, gpa, student plan for attending school, parent education, parent income, parent newspaper reading
+
+```{r}
+# Select covariates that represent the "true" model for selection, fit model
+ypsps_covariates <- ypsps %>% 
+	select(interviewid, college, student_Gen, student_Race, student_GPA, student_NextSch, parent_EducHH, parent_HHInc, parent_Newspaper, student_ppnscal)
+
+glm_model <- glm(formula = college ~ student_Gen + student_Race + student_GPA + student_NextSch + parent_EducHH + parent_HHInc + parent_Newspaper, family = binomial(), data = ypsps_covariates)
+
+ypsps_covariates$propensity_score <- predict(glm_model, type = "response")
+
+match_exact_att <- matchit(formula= college ~ student_Gen + student_Race + student_GPA + student_NextSch + parent_EducHH + parent_HHInc + parent_Newspaper, data = ypsps_covariates, method = "exact", estimand = "ATT")
+
+# Report the overall balance and the proportion of covariates that meet the balance threshold
+match_summ <- summary(match_exact_att, un=F)
+
+# Filter covariates based on SMD threshold
+balanced_covariates <- match_summ$sum.matched[abs(match_summ$sum.matched[, "Std. Mean Diff."]) < 0.1, ]
+
+# Print balanced covariates
+print(balanced_covariates)
+
+```
+Covariate plot 
+```{r}
+#covariate plot 
+match_exact_att <- matchit(formula= college ~ student_Gen + student_Race + student_GPA + student_NextSch + parent_EducHH + parent_HHInc + parent_Newspaper, data = ypsps_covariates, method = "exact", estimand = "ATT")
+
+#make covariate plot
+love.plot(match_exact_att)
+```
+
+All variables met the threshold, it looks balanced on the plot, I will keep all my covariates. Now, calculate ATT:
+
+```{r}
+#estimate the ATT using linear regression
+match_exact_att_data <- match.data(match_exact_att)
+
+# model
+lm_full_att <- lm(student_ppnscal ~ college + student_Gen + student_Race + student_GPA + student_NextSch + parent_EducHH + parent_HHInc + parent_Newspaper, data = match_exact_att_data, weights = weights)
+
+#summarize results
+lm_full_att_summ <- summary(lm_full_att)
+
+#calculate ATT
+ATT_full <- lm_full_att_summ$coefficients["college","Estimate"]
+ATT_full
+```
+
+## Simulations with random covariates
+
+```{r}
+# Data manipulation: rename post treatment covariates with "post_", create list of post_vars names, and prevars_df
+df_renamed <- ypsps %>%
+  rename_with(~paste0("post_", .), contains("1973") | contains("1983") | contains("1982"))
+
+# Get list of post-treatment variable names
+post_vars <- names(df_renamed) %>%
+  keep(~str_starts(., "post_"))
+
+# Create prevars_df excluding post-treatment variables and specific placebo variables
+prevars_df <- df_renamed %>%
+  select(-any_of(c(post_vars, "interviewid", "treatment", "parent_GPHighSchoolPlacebo", "parent_HHCollegePlacebo", "college"))) %>%
+  filter_all(any_vars(!is.na(.)))  # Filter out rows with any NA values
+
+# Get names of pre-treatment variables
+pre_vars <- colnames(prevars_df)
+
+# Initialize an empty matrix to store results
+result_matrix <- matrix(nrow = 10000, ncol = 3)
+colnames(result_matrix) <- c("ATT", "Proportion", "Improvement")
+
+# Simulate random selection of features 10k+ times
+for (i in 1:10000) {
+ suppressWarnings({ # Randomly select the number of covariates
+  num_covariates <- sample(1:length(pre_vars), 1)
+  # Randomly choose covariates
+  random_covariates <- sample(pre_vars, num_covariates)
+  # Select the columns
+  df <- df_renamed %>%
+    select(college, student_ppnscal, all_of(random_covariates)) %>%
+    filter(complete.cases(.)) 
+  # Fit the propensity score model (assuming glm for simplicity)
+  model <- glm(as.formula(paste("college ~", paste(random_covariates, collapse = "+"))), data = df)
+  # Match treated and control units
+  match_att <- matchit(as.formula(paste("college ~", paste(random_covariates, collapse = "+"))), data = df, family = binomial(), estimand = "ATT")
+# Report the overall balance and the proportion of covariates that meet the balance threshold
+	match_summ <- summary(match_att, un=F)
+	# Filter covariates based on SMD threshold
+	balanced_covariates <- match_summ$sum.matched[abs(match_summ$sum.matched[, "Std. Mean Diff."]) < 0.1, ]
+  proportion_true <- length(balanced_covariates) / length(random_covariates)
+  match_exact_att_data <- match.data(match_att)
+  #define covariates
+  covariates <- random_covariates
+  matched_df <- match_exact_att_data
+  smd_before <- sapply(df[, covariates], function(x) {
+  (mean(x[df[["college"]] == 1],na.rm=T) - mean(x[df[["college"]] == 0],na.rm=T)) / 
+  sqrt((var(x[df[["college"]] == 1]) + var(x[df[["college"]] == 0])) / 2)
+  })
+  # Calculate SMD after matching
+  smd_after <- sapply(df[, covariates], function(x) {
+    (mean(x[matched_df[["college"]] == 1],na.rm=T) - mean(x[matched_df[["college"]] == 0],na.rm=T)) / 
+    sqrt((var(x[matched_df[["college"]] == 1]) + var(x[matched_df[["college"]] == 0])) / 2)
+  })
+  # Calculate mean percent improvement
+  mean_percent_improvement <- mean((smd_before - smd_after) / smd_before * 100, na.rm = TRUE)
+	# model
+	model <- lm(as.formula(paste("student_ppnscal ~ college +", paste(random_covariates, collapse = "+"))), data = df)
+ #summarize results
+	lm_full_att_summ <- summary(model)
+	#calculate ATT
+	ATT <- lm_full_att_summ$coefficients["college","Estimate"]
+ })
+  result_matrix[i, ] <- c(ATT, proportion_true, mean_percent_improvement)
+  
+}
+
+# Fit p-score models and save ATTs, proportion of balanced covariates, and mean percent balance improvement
+
+# Plot ATT v. proportion
+result_df <- as.data.frame(result_matrix)
+subsample_df <- result_df[sample(nrow(result_df), 1000), ]
+ggplot(subsample_df, aes(ATT, Proportion)) +
+  geom_point()+
+	geom_smooth(method = "lm", se = FALSE, color = "red") +  # Add trend line without confidence intervals
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Proportion of covariates vs ATT", x = "Proportion of balanced covariates", y = "ATT estimate") +
+  theme_minimal()
+
+```
+
+```{r}
+hist(result_df$Proportion)
+```
+```{r}
+hist(result_df$ATT)
+```
+
+```{r}
+#empty list of love plots
+match_list <- list()
+
+# Set up loop to iterate 10 times
+for (i in 1:10) {
+  # Randomly select the number of covariates
+  num_covariates <- sample(1:length(pre_vars), 1)
+  
+  # Randomly choose covariates
+  random_covariates <- sample(pre_vars, num_covariates)
+  
+  # Select the random columns
+  df <- df_renamed %>%
+    select(interviewid, college, student_ppnscal, all_of(random_covariates))
+  
+  # Step 3: Calculate ATT
+  # Match treated and control units
+  match_att <- matchit(as.formula(paste("college ~", paste(random_covariates, collapse = "+"))), data = df, family = binomial(), estimand = "ATT")
+  
+  # Store the results in the result matrix
+match_list[[i]] <- love.plot(match_att)}
+grid.arrange(grobs = match_list, ncol = 3)
+```
+
+```{r}
+#count number of simulations where balanced covariate proportion was higher
+#find mean proportion
+meanprop <- mean(result_df$Proportion)
+#filter for higher than mean proportion
+higherprop <- result_df %>%
+  filter(Proportion > meanprop)
+#count number of simulations
+nrow(higherprop)
+```
+
+## Questions
+
+\begin{enumerate}
+    \item \textbf{How many simulations resulted in models with a higher proportion of balanced covariates? Do you have any concerns about this?}
+    From looking at the histogram of proportions, 57% (5744/ 10,000) of my simulation models had a higher proportion of balanced covariates. I'm concerned as this is a high level of unbalanced covariates, and that this demonstrates issues that come up when a model is incorrectly specified (in this case, it's random). Since the number of covariates are random too, I think the higher 'proportion of balanced covariate' models might have small sample sizes due to high number of unmatched observations and cause ATT to decrease and vary widely. 
+    \item \textbf{Analyze the distribution of the ATTs. Do you have any concerns about this distribution?}
+    Your Answer: ATT graph is right skewed, I believe that suggests that the true treatment effect is positive but underestimated since the models are not correctly specified. It also has a wide range, which shows me that a bad model can lead to wonky results down the line. 
+    \item \textbf{Do your 10 randomly chosen covariate balance plots produce similar numbers on the same covariates? Is it a concern if they do not?}
+    Your Answer: It's hard to tell whether there are similar numbers on the same covariates based on covariate balance plots alone since there are such a varying number of covariates. I can see that the covariate balance is very inconsistent so it would be a good way for me to know that my results are biased. 
+\end{enumerate}
+
+# Matching Algorithm of Your Choice
+
+## Simulate Alternative Model: Nearest Neighbor
+```{r}
+# Initialize matrix
+result_matrix_1 <- matrix(nrow = 10000, ncol = 3)
+colnames(result_matrix_1) <- c("ATT", "Proportion", "Improvement")
+
+# Simulate random selection of features 1000 times
+for (i in 1:10000) {
+  suppressWarnings({
+    # Randomly select the number of covariates
+    num_covariates <- sample(1:length(pre_vars), 1)
+    # Randomly choose covariates
+    random_covariates <- sample(pre_vars, num_covariates)
+    # Select the columns
+    df <- df_renamed %>%
+      select(college, student_ppnscal, all_of(random_covariates)) %>%
+      filter(complete.cases(.))
+    # Fit the propensity score model using KNN matching
+    match_att <- matchit(as.formula(paste("college ~", paste(random_covariates, collapse = "+"))),
+                         data = df,
+                         method = "nearest",
+                         distance = "glm",
+                         link = "logit",
+                         discard = "control",
+                         replace = FALSE,
+                         ratio = 2)
+    # Report the overall balance and the proportion of covariates that meet the balance threshold
+    match_summ <- summary(match_att, un = FALSE)
+    # Filter covariates based on SMD threshold
+    balanced_covariates <- match_summ$sum.matched[abs(match_summ$sum.matched[, "Std. Mean Diff."]) < 0.1, ]
+    proportion_true <- length(balanced_covariates) / length(random_covariates)
+    match_exact_att_data <- match.data(match_att)
+    # Define covariates
+    covariates <- random_covariates
+    matched_df <- match_exact_att_data
+    smd_before <- sapply(df[, covariates], function(x) {
+      (mean(x[df[["college"]] == 1], na.rm = TRUE) - mean(x[df[["college"]] == 0], na.rm = TRUE)) / 
+        sqrt((var(x[df[["college"]] == 1]) + var(x[df[["college"]] == 0])) / 2)
+    })
+    # Calculate SMD after matching
+    smd_after <- sapply(df[, covariates], function(x) {
+      (mean(x[matched_df[["college"]] == 1], na.rm = TRUE) - mean(x[matched_df[["college"]] == 0], na.rm = TRUE)) / 
+        sqrt((var(x[matched_df[["college"]] == 1]) + var(x[matched_df[["college"]] == 0])) / 2)
+    })
+    # Calculate mean percent improvement
+    mean_percent_improvement <- mean((smd_before - smd_after) / smd_before * 100, na.rm = TRUE)
+    # Fit linear model
+    model <- lm(as.formula(paste("student_ppnscal ~ college +", paste(random_covariates, collapse = "+"))), data = df)
+    # Summarize results
+    lm_full_att_summ <- summary(model)
+    # Calculate ATT
+    ATT <- lm_full_att_summ$coefficients["college", "Estimate"]
+  })
+    # Store results in matrix
+    result_matrix_1[i, ] <- c(ATT, proportion_true, mean_percent_improvement)
+}
+```
+
+
+```{r}
+# Plot ATT v. proportion
+result_df_1 <- as.data.frame(result_matrix_1)
+
+subsample_df <- result_df_1[sample(nrow(result_df_1), 100), ]
+ggplot(subsample_df, aes(ATT, Proportion)) +
+  geom_point()+
+	geom_smooth(method = "lm", se = FALSE, color = "red") +  # Add trend line without confidence intervals
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Proportion of covariates vs ATT", x = "Proportion of covariates above 0.1 threshold", y = "ATT estimate") +
+  theme_minimal()
+```
+
+
+```{r}
+#empty list of love plots
+match_list <- list()
+
+# Set up loop to iterate 10 times
+for (i in 1:10) {
+  # Randomly select the number of covariates
+  num_covariates <- sample(1:length(pre_vars), 1)
+  
+  # Randomly choose covariates
+  random_covariates <- sample(pre_vars, num_covariates)
+  
+  # Select the random columns
+  df <- df_renamed %>%
+    select(interviewid, college, student_ppnscal, all_of(random_covariates))
+  
+  # Step 3: Calculate ATT
+  # Match treated and control units
+  match_att <- matchit(as.formula(paste("college ~", paste(random_covariates, collapse = "+"))), 
+                       data = df, 
+                       method = "nearest",
+                       distance = "glm",
+                       link = "logit",
+                       discard = "control",
+                       replace = FALSE,
+                       ratio = 2)
+  
+  # Store the results in the result matrix
+match_list[[i]] <- love.plot(match_att)}
+grid.arrange(grobs = match_list, ncol = 3)
+
+```
+
+```{r}
+hist(result_df_1$Proportion)
+```
+
+
+```{r}
+hist(result_df_1$ATT)
+```
+
+```{r}
+# Create density plots for the old method and the new method
+old_method_plot <- ggplot(result_df, aes(x = Improvement)) +
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Distribution of Percent Improvement (Old Method)", x = "Percent Improvement", y = "Density") +
+  theme_minimal()
+
+new_method_plot <- ggplot(result_df_1, aes(x = Improvement)) +
+  geom_density(fill = "red", alpha = 0.5) +
+  labs(title = "Distribution of Percent Improvement (New Method)", x = "Percent Improvement", y = "Density") +
+  theme_minimal()
+
+combined_plot <- ggplot() +
+  geom_density(data = result_df, aes(x = Improvement, fill = "Old Method"), alpha = 0.5) +
+  geom_density(data = result_df_1, aes(x = Improvement, fill = "Nearest Neighbor"), alpha = 0.5) +
+  labs(title = "Distribution of Percent Improvement", x = "Percent Improvement", y = "Density") +
+  scale_fill_manual(values = c("Old Method" = "blue", "Nearest Neighbor" = "red"), labels = c("Old Method", "Nearest Neighbor")) +
+  theme_minimal()
+
+# Display the combined plot
+print(combined_plot)
+
+```
+
+
+```{r}
+#count number of simulations where balanced covariate proportion was higher
+#find mean proportion
+meanprop <- mean(result_df_1$Proportion)
+#filter for higher than mean proportion
+higherprop <- result_df_1 %>%
+  filter(!is.na(Proportion)) %>%  # Remove rows with NA in Proportion column
+  filter(Proportion > meanprop)
+# Count number of simulations
+num_higherprop <- nrow(higherprop)
+```
+
+## Questions
+
+\begin{enumerate}
+    \item \textbf{Does your alternative matching method have more runs with higher proportions of balanced covariates?}
+     Your Answer: I got 5811 nearest neighbor matching compared to 5744 for propensity scoring. The new method has higher proportions of balanced covariates (more above mean)
+    \item \textbf{Use a visualization to examine the change in the distribution of the percent improvement in balance in propensity score matching vs. the distribution of the percent improvement in balance in your new method. Which did better? Analyze the results in 1-2 sentences.}
+    The distribution of the KNN method is not as spread out as propensity score matching method and is centered at the same mean. KNN is a better method since the spread is smaller. The percent improvement mean is the same though, meaning that it's likely that KNN can achieve better results with fewer simulations needed. To me, it's a more reliable matching method. 
+\end{enumerate}
+
+# Discussion Questions
+
+\begin{enumerate}
+    \item \textbf{Why might it be a good idea to do matching even if we have a randomized or as-if-random design?}
+    Your Answer: There might be a bias where randomization doesn't evenly distribute baseline covariates evenly. It's a good way to conduct sensitivity analysis to ensure that a randomization process is providing unbiased results, since even when we have randomization, there might be unbalanced covariates to bias the treatment effects. 
+    \item \textbf{The standard way of estimating the propensity score is using a logistic regression to estimate probability of treatment. Given what we know about the curse of dimensionality, do you think there might be advantages to using other machine learning algorithms (decision trees, bagging/boosting forests, ensembles, etc.) to estimate propensity scores instead?}
+    Yes it might be better to use other ML algorithms to match because we can calibrate based on overfitting concerns. For example, BART could reduce the weight of covariates that are less important and provide better estimates that are more generalizable to new data. 
+\end{enumerate}
